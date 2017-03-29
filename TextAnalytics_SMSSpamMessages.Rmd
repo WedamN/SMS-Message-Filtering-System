@@ -1,0 +1,377 @@
+---
+title: "Short Message Service (SMS) Classification"
+author: "Wedam Nyaaba"
+date: "March 25, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+&nbsp;
+
+**Required Packages**:
+
+- magrittr:Fforward pipe operator
+- stringr: String manipulation
+- dplyr: Data Wrangling
+- tm: Text mining
+- ggplot2: Data visualization
+- caret: For building classifiers
+
+
+
+\newpage
+
+```{r}
+# Clean the environment
+rm(list = ls())
+library(magrittr)
+
+```
+
+# 1. Read and Transform Data
+
+The lines of the text file (SMSSpamCollection.txt) are read into a character vector from which we can extract information to create a data frame.
+
+```{r}
+line <- readLines("SMSSpamCollection.txt")
+
+```
+
+Preview the structure of line
+
+```{r}
+str(line)
+```
+Show the first 20 lines
+
+```{r}
+head(line,20)
+```
+Remove non-character lines
+```{r}
+line <- line[trimws(line)!=""]
+
+head(line)
+```
+
+Create a data frame
+```{r}
+# Use line index as message ID 
+ID <- c(1:length(line))
+df <- data.frame(ID)
+head(df)
+```
+Extraction of text contents is achieved by the **word** function in **stringr** package.
+```{r}
+library(stringr)
+# Extract the contents of each spam message to be saved under a new column (Text) in df
+df$Text <- word(line, 2, -1, sep = fixed('\t'))
+head(df)
+```
+ 
+```{r}
+# Extract the category of each spam message to be saved under a new column (Class) in df
+df$Class <- word(line, 1, sep = fixed('\t'))
+
+head(df)
+```
+
+```{r}
+# Remove the line object from the current environment
+rm(line)
+```
+
+# 2. Text Analysis
+
+## 2.1 Create a document object
+```{r}
+# Load tm package
+library(tm)
+
+```
+
+
+
+```{r}
+# Create a document collection, aka corpus
+
+dfCorpus <- Corpus(VectorSource(df$Text))
+
+inspect(dfCorpus)
+```
+
+## 2.2 Text data transformation
+
+```{r}
+# strip whitspace from the corpus
+dfCorpus <- tm_map(dfCorpus, stripWhitespace)
+
+# convert uppercase to lowercase 
+dfCorpus <- tm_map(dfCorpus, content_transformer(tolower))
+
+# remove numbers from the document collection
+dfCorpus <- tm_map(dfCorpus, removeNumbers)
+
+# remove punctuation from the document collection
+dfCorpus <- tm_map(dfCorpus, removePunctuation)
+
+# using a standard list, remove English stopwords from the document collection
+dfCorpus <- tm_map(dfCorpus,removeWords, stopwords("english"))
+
+# Stem
+dfCorpus <- tm_map(dfCorpus, stemDocument, language = "english")  
+
+inspect(dfCorpus) 
+```
+
+
+## 2.3 Create a term-document matrix (TDM)
+
+Here, a bag of words assumption is considered in creating the matrix from the dfCorpus object
+```{r}
+tdm <- TermDocumentMatrix(dfCorpus)
+inspect(tdm)
+```
+```{r}
+examine.tdm <- removeSparseTerms(tdm, sparse = 0.9)
+top.words <- Terms(examine.tdm)
+print(top.words) 
+```
+We further drop "call" since its sparse percentage of empty elements is at least 90%. 
+```{r}
+my_stop_words <- c("call")
+
+dfCorpus <- tm_map(dfCorpus, removeWords, my_stop_words)
+
+```
+Recreate TDM 
+
+```{r}
+tdm <- TermDocumentMatrix(dfCorpus)
+inspect(tdm)
+```
+## 2.4 Create a word cloud from corpus
+
+```{r, fig.width=10}
+library(wordcloud)
+library(RColorBrewer)
+
+# Word cloud for the whole copus (40 documents)
+wordcloud(dfCorpus, 
+          max.words = 150,
+          random.order = FALSE,
+          colors = brewer.pal(8, "Dark2"))
+
+```
+
+Save movie SMS documents and document collection (corpus) in order to reuse them for further data analysis.
+```{r}
+save("df","dfCorpus","tdm", file = "SMS_Spam_data.Rdata")
+```
+
+# 3. Feature Selection - select a subset of term features to improve classification accuracy and efficiency
+
+## 3.1 Explore Frequent Terms
+```{r}
+# Find terms that occurs at least 100 times in the corpus
+findFreqTerms(tdm,100)
+```
+```{r}
+# Find terms that are associated with 'love'
+findAssocs(tdm, "love", 0.2)
+```
+
+```{r}
+library(magrittr)
+
+# Find the top terms by frequency
+freq_term <- tdm %>% as.matrix() %>% 
+  rowSums() %>% 
+  sort(decreasing=TRUE) %>% 
+  data.frame(word = names(.),freq=.)
+
+head(freq_term)
+```
+```{r}
+# Plot of the term frequency
+plot(freq_term$freq)
+```
+## 3.2 Select Term Features
+```{r}
+# Obtain a subset of the top 100 most frequent terms
+top_terms <- freq_term$word %>% 
+  as.character() %>% head(50)
+top_terms
+```
+
+Create a document-term matrix (DTM) of the top_terms, to be included in a data frame where each document will be assigned a category (spam or ham).
+
+```{r}
+top_terms_dtm <- DocumentTermMatrix(Corpus(VectorSource(df$Text)),control = list(dictionary = top_terms))
+inspect(top_terms_dtm)
+```
+
+```{r}
+# Convert DTM into a data frame
+df_termFeatures <- as.data.frame(as.matrix(top_terms_dtm))
+
+# Add the Category column
+df_termFeatures$Category <- df$Class
+
+head(df_termFeatures)
+
+```
+Transform Category variable into a 1/0 variable where 1 indicates a ham message, and 0 indicates a spam message
+```{r}
+
+df_termFeatures$Category <- ifelse(df_termFeatures$Category == "ham", 1, 0)
+
+head(df_termFeatures)
+```
+```{r}
+# Preview structure of df_termFeatures
+str(df_termFeatures)
+```
+
+# 4. Text Classification 
+
+## 4.1 Partition data
+
+```{r}
+# load caret package
+library(caret)
+```
+
+```{r}
+# A 30-70% splitting strategy is used here
+ 
+set.seed(123)
+trainIndex = createDataPartition(df_termFeatures$Category, p = .7, list = FALSE)
+
+head(trainIndex)
+```
+
+```{r}
+# Create training and test data
+
+trainData <- df_termFeatures[trainIndex,]
+testData <- df_termFeatures[-trainIndex,]
+
+```
+
+## 4.2 Classifiers
+
+We build two classifiers for comparison: Logistic Regression and Naive Bayes
+
+### 4.2.1 Logistic Regression Classifier
+
+```{r}
+fit_logit <- glm(Category ~., family = binomial(link = 'logit'), data = trainData)
+
+# Show results
+summary(fit_logit)
+```
+
+We use the stepAIC() method in the MASS package to further refine the term features selection
+
+```{r}
+library(MASS)
+
+step <- stepAIC(fit_logit,direction = "both")
+
+# Show results
+step$anova
+```
+
+We now fit the final logit model
+
+```{r}
+final_fit_logit <- glm(Category ~ now + get + can + will + just + come + free + ltgt + 
+    know + like + day + love + text + need + one + see + today + 
+    txt + home + week + repli + take + lor + tell + still + mobil + 
+    make + phone + say + pleas + new + work + well + later, family = binomial(link = "logit"), data = trainData)
+
+# Show results
+summary(final_fit_logit)
+```
+
+Compare **fit_logit** and **final_fit_logit** models in a table
+
+```{r}
+# Load stargazer package
+library(stargazer)
+
+stargazer(fit_logit,final_fit_logit, type = "text", star.cutoffs = c(0.05, 0.01, 0.001), title = "Multiple Logistic Linear Regression", digits = 4)
+```
+
+Evaluate Predictive performance of the **final_fit_logit** model. Here we use the **predict()** function in the **caret** package
+
+```{r}
+# Define a new variable Pred_Category to store the predicted probabilities
+testData$Pred_Categorylogit <- predict(final_fit_logit, testData, type = "response")
+```
+
+Create a predicted class variable to represent Pred_Category:
+
+- Predicted class = 1 if Pred_Category >= 0.5
+- Predicted class = 0 if Pred_Category < 0.5
+
+```{r}
+testData$Pred_Category <- ifelse(testData$Pred_Categorylogit >= 0.5, 1, 0)
+```
+
+Create a **confusion matrix** to observe the accuracy of the model
+
+```{r}
+confusionMatrix(testData$Category,testData$Pred_Categorylogit)
+```
+
+
+### 4.2.2 Naive Bayes Classifier
+
+```{r}
+# Load e1071 package
+
+library(e1071)
+
+# Define a formula
+f <- as.formula(Category ~.)
+
+# Compute conditional probabilities
+fit_naiveBayes <- naiveBayes(f, data = trainData)
+
+fit_naiveBayes
+```
+
+Use term features selected by the stepAIC method to obtain a final naiveBayes fit
+
+```{r}
+# Define a formula
+f <- as.formula(Category ~ now + get + can + will + just + come + free + ltgt + 
+    know + like + day + love + text + need + one + see + today + 
+    txt + home + week + repli + take + lor + tell + still + mobil + 
+    make + phone + say + pleas + new + work + well + later)
+
+# Compute conditional probabilities
+final_fit_naiveBayes <- naiveBayes(f, data = trainData)
+
+final_fit_naiveBayes
+
+```
+
+Evaluate Predictive performance of the **final_fit_naiveBayes** model. Here we use the **predict()** function in the **e1071** package
+
+```{r}
+predict(final_fit_naiveBayes, testData, type = "raw")
+```
+
+
+
+
+
+
+
